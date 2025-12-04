@@ -63,49 +63,120 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $new_bin_id = $stmt->insert_id;
             $stmt->close();
 
-            // Insert notification for the new bin (uses PDO when available; falls back to mysqli)
-            try {
-                $creatorAdminId = getCurrentUserId() ?: null;
-                $assignedJanitor = $assigned_to !== '' ? $assigned_to : null;
-                $notificationType = 'success';
-                $title = "New Bin Added";
-                $message = "Bin '{$bin_code}' was added" . (!empty($location) ? " at {$location}" : "") . ".";
+          // Replace the existing `send_notification` POST action in bins.php with the code below.
+// This will create the admin notification (as before) and also insert a row into
+// `janitor_alerts` for the assigned janitor so it appears in the janitor Alerts UI.
+
+if ($action === 'send_notification') {
+    $bin_id = intval($_POST['bin_id'] ?? 0);
+    $message = $_POST['message'] ?? 'Please check the bin.';
+    $title = "Manual Notification";
+    $notificationType = 'attention'; // admin-initiated messages to janitors
+
+    try {
+        $creatorAdminId = getCurrentUserId() ?: null;
+
+        // determine assigned janitor for bin
+        $assigned = null;
+        $res = $conn->query("SELECT assigned_to FROM bins WHERE bin_id = " . (int)$bin_id . " LIMIT 1");
+        if ($res && ($r = $res->fetch_assoc())) $assigned = $r['assigned_to'];
+
+        $newNotificationId = null;
+
+        // Insert into notifications (DB)
+        if (isset($pdo) && $pdo instanceof PDO) {
+            $stmtN = $pdo->prepare("
+                INSERT INTO notifications (admin_id, janitor_id, bin_id, notification_type, title, message, created_at)
+                VALUES (:admin_id, :janitor_id, :bin_id, :type, :title, :message, NOW())
+            ");
+            $stmtN->execute([
+                ':admin_id'   => $creatorAdminId,
+                ':janitor_id' => $assigned,
+                ':bin_id'     => $bin_id,
+                ':type'       => $notificationType,
+                ':title'      => $title,
+                ':message'    => $message
+            ]);
+            $newNotificationId = (int)$pdo->lastInsertId();
+        } else {
+            if ($conn->query("SHOW TABLES LIKE 'notifications'")->num_rows > 0) {
+                $stmtN = $conn->prepare("
+                    INSERT INTO notifications (admin_id, janitor_id, bin_id, notification_type, title, message, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ");
+                if ($stmtN) {
+                    $adminParam = $creatorAdminId !== null ? (int)$creatorAdminId : null;
+                    $janitorParam = $assigned !== null ? (int)$assigned : null;
+                    $stmtN->bind_param("iiisss", $adminParam, $janitorParam, $bin_id, $notificationType, $title, $message);
+                    $stmtN->execute();
+                    $newNotificationId = $stmtN->insert_id ?? null;
+                    $stmtN->close();
+                }
+            }
+        }
+
+        // — NEW: Also insert into janitor_alerts so the janitor sees this in Alerts immediately —
+        // Only do this when there is a target janitor (assigned) and the janitor_alerts table exists.
+        $targetJanitor = $assigned;
+        if (empty($targetJanitor)) {
+            // fallback: try to resolve assigned_to again (safe)
+            $r2 = $conn->query("SELECT assigned_to FROM bins WHERE bin_id = " . intval($bin_id) . " LIMIT 1");
+            if ($r2 && ($row2 = $r2->fetch_assoc())) $targetJanitor = $row2['assigned_to'] ?? null;
+        }
+
+        if (!empty($targetJanitor)) {
+            // check janitor_alerts table existence
+            $hasAlerts = false;
+            if (isset($pdo) && $pdo instanceof PDO) {
+                try {
+                    $r = $pdo->query("SHOW TABLES LIKE 'janitor_alerts'");
+                    $hasAlerts = ($r && $r->rowCount() > 0);
+                } catch (Exception $e) { $hasAlerts = false; }
+            } else {
+                $r = $conn->query("SHOW TABLES LIKE 'janitor_alerts'");
+                $hasAlerts = ($r && $r->num_rows > 0);
+            }
+
+            if ($hasAlerts) {
+                $alertTitle = $title;
+                $alertMessage = $message;
 
                 if (isset($pdo) && $pdo instanceof PDO) {
-                    $stmtN = $pdo->prepare("
-                        INSERT INTO notifications (admin_id, janitor_id, bin_id, notification_type, title, message, created_at)
-                        VALUES (:admin_id, :janitor_id, :bin_id, :type, :title, :message, NOW())
+                    // Use INSERT IGNORE semantics to avoid duplicates if unique index exists
+                    $ins = $pdo->prepare("
+                        INSERT IGNORE INTO janitor_alerts (notification_id, janitor_id, bin_id, title, message, is_read, created_at)
+                        VALUES (:nid, :jid, :bid, :title, :message, 0, NOW())
                     ");
-                    $stmtN->execute([
-                        ':admin_id' => $creatorAdminId,
-                        ':janitor_id' => $assignedJanitor,
-                        ':bin_id' => (int)$new_bin_id,
-                        ':type' => $notificationType,
-                        ':title' => $title,
-                        ':message' => $message
+                    $ins->execute([
+                        ':nid' => $newNotificationId !== null ? $newNotificationId : null,
+                        ':jid' => (int)$targetJanitor,
+                        ':bid' => (int)$bin_id,
+                        ':title' => $alertTitle,
+                        ':message' => $alertMessage
                     ]);
                 } else {
-                    // fallback to mysqli
-                    if ($conn->query("SHOW TABLES LIKE 'notifications'")->num_rows > 0) {
-                        $stmtN = $conn->prepare("
-                            INSERT INTO notifications (admin_id, janitor_id, bin_id, notification_type, title, message, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, NOW())
-                        ");
-                        if ($stmtN) {
-                            // Note: bind_param with NULL works by passing null variables.
-                            $adminParam = $creatorAdminId !== null ? (int)$creatorAdminId : null;
-                            $janitorParam = $assignedJanitor !== null ? (int)$assignedJanitor : null;
-                            $binParam = (int)$new_bin_id;
-                            $stmtN->bind_param("iiisss", $adminParam, $janitorParam, $binParam, $notificationType, $title, $message);
-                            $stmtN->execute();
-                            $stmtN->close();
-                        }
-                    }
+                    $nidVal = $newNotificationId !== null ? intval($newNotificationId) : 'NULL';
+                    $jidVal = intval($targetJanitor);
+                    $bidVal = intval($bin_id);
+                    $titleEsc = $conn->real_escape_string($alertTitle);
+                    $msgEsc = $conn->real_escape_string($alertMessage);
+
+                    // Use INSERT IGNORE to avoid duplicates if unique constraint exists
+                    $sql = "
+                      INSERT IGNORE INTO janitor_alerts (notification_id, janitor_id, bin_id, title, message, is_read, created_at)
+                      VALUES ({$nidVal}, {$jidVal}, {$bidVal}, '{$titleEsc}', '{$msgEsc}', 0, NOW())
+                    ";
+                    $conn->query($sql);
                 }
-            } catch (Exception $e) {
-                error_log("[bins] notification insert failed: " . $e->getMessage());
-                // Continue even if notification insertion fails
             }
+        }
+    } catch (Exception $e) {
+        error_log("[bins] send_notification failed: " . $e->getMessage());
+    }
+
+    echo json_encode(['success' => true]);
+    exit;
+}
 
             // ✅ FIXED: join with janitors table
             $stmt = $conn->prepare("

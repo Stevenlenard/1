@@ -1,6 +1,10 @@
 <?php
 require_once 'includes/config.php';
 
+// Add near top of file (once): include the helper for janitor_alerts
+// Ensure includes/janitor-alerts-functions.php exists in your repo (it was provided in earlier messages).
+include_once __DIR__ . '/includes/janitor-alerts-functions.php';
+
 // Check if user is logged in
 if (!isLoggedIn()) {
     header('Location: user-login.php');
@@ -113,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $message = "{$janitor_name} updated status to \"{$statusText}\".";
         if (!empty($actionType)) $message .= " Action: {$actionType}.";
 
-        // Insert notification
+        // Insert notification for admins (existing behavior)
         try {
             if (isset($pdo) && $pdo instanceof PDO) {
                 $stmtN = $pdo->prepare("
@@ -128,6 +132,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     ':title' => $title,
                     ':message' => $message
                 ]);
+                // capture notification id if needed
+                $newNotificationId = (int)$pdo->lastInsertId();
             } else {
                 if ($conn->query("SHOW TABLES LIKE 'notifications'")->num_rows > 0) {
                     $stmtN = $conn->prepare("
@@ -143,12 +149,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         $messageParam = $message;
                         $stmtN->bind_param("iiisss", $adminParam, $janitorParam, $binParam, $typeParam, $titleParam, $messageParam);
                         $stmtN->execute();
+                        $newNotificationId = $stmtN->insert_id ?? null;
                         $stmtN->close();
                     }
+                } else {
+                    $newNotificationId = null;
                 }
             }
         } catch (Exception $e) {
             error_log("[janitor_assigned_bins] notification insert failed: " . $e->getMessage());
+            $newNotificationId = null;
+        }
+
+        // --- NEW: Force-insert into janitor_alerts every time the status is updated --
+        // This will create an alert on every status change (no dedupe). If you prefer dedupe,
+        // call create_alert_for_bin with $forceInsert = false or use insert_janitor_alert directly.
+        try {
+            // Pass $newNotificationId if available (admins notification reference), and forceInsert = true
+            if (function_exists('create_alert_for_bin')) {
+                create_alert_for_bin($bin_id, $title, $message, $newNotificationId ?? null, true);
+            } else {
+                // As a fallback, attempt a direct insert (no dedupe)
+                if (isset($pdo) && $pdo instanceof PDO) {
+                    $ins = $pdo->prepare("INSERT INTO janitor_alerts (notification_id, janitor_id, bin_id, title, message, is_read, created_at) VALUES (:nid, :jid, :bid, :title, :msg, 0, NOW())");
+                    $ins->execute([
+                        ':nid' => $newNotificationId ?? null,
+                        ':jid' => $janitorId,
+                        ':bid' => $bin_id ?: null,
+                        ':title' => $title,
+                        ':msg' => $message
+                    ]);
+                } else {
+                    $nidVal = $newNotificationId !== null ? intval($newNotificationId) : 'NULL';
+                    $jidVal = intval($janitorId);
+                    $bidVal = $bin_id > 0 ? intval($bin_id) : 'NULL';
+                    $titleEsc = $conn->real_escape_string($title);
+                    $msgEsc = $conn->real_escape_string($message);
+                    $sql = "INSERT INTO janitor_alerts (notification_id, janitor_id, bin_id, title, message, is_read, created_at) VALUES ({$nidVal}, {$jidVal}, " . ($bidVal === 'NULL' ? 'NULL' : $bidVal) . ", '{$titleEsc}', '{$msgEsc}', 0, NOW())";
+                    $conn->query($sql);
+                }
+            }
+        } catch (Exception $e) {
+            error_log("[janitor_assigned_bins] force janitor_alerts insert failed: " . $e->getMessage());
+            // do not fail the main operation if alert insert fails
         }
 
         echo json_encode(['success' => true, 'status' => $status, 'affected' => $affected]);
@@ -306,7 +349,7 @@ try {
                        LEFT JOIN janitors j ON bins.assigned_to = j.janitor_id
                        WHERE bins.assigned_to = " . $conn->real_escape_string($janitorId) . "
                        ORDER BY
-                         CASE WHEN (bins.status = 'full' OR (bins.capacity IS NOT NULL && bins.capacity >= 100)) THEN 0 ELSE 1 END,
+                         CASE WHEN (bins.status = 'full' OR (bins.capacity IS NOT NULL AND bins.capacity >= 100)) THEN 0 ELSE 1 END,
                          bins.capacity DESC,
                          bins.created_at DESC
                        LIMIT 200";

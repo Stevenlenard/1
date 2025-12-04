@@ -2,6 +2,8 @@
 -- Create Database
 /* CREATE DATABASE IF NOT EXISTS trashbin_management;
 USE trashbin_management; */
+select * From admins;
+
 
 CREATE TABLE IF NOT EXISTS admins (
     admin_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -85,6 +87,8 @@ CREATE TABLE IF NOT EXISTS collections (
     INDEX idx_collected_at (collected_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+SELECT * FROM notifications;
+
 CREATE TABLE IF NOT EXISTS notifications (
     notification_id INT AUTO_INCREMENT PRIMARY KEY,
     admin_id INT NULL,
@@ -103,7 +107,6 @@ CREATE TABLE IF NOT EXISTS notifications (
     INDEX idx_notification_type (notification_type),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 
 CREATE TABLE IF NOT EXISTS reports (
     report_id INT AUTO_INCREMENT PRIMARY KEY,
@@ -152,6 +155,26 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Add persistent sessions table for login persistence
+
+SELECT * FROM notifications;
+DELETE FROM bins WHERE bin_id = 5;
+
+-- Create janitor_alerts table
+CREATE TABLE IF NOT EXISTS `janitor_alerts` (
+  `alert_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `notification_id` INT NULL,
+  `janitor_id` INT NULL,
+  `bin_id` INT NULL,
+  `title` VARCHAR(255) NOT NULL,
+  `message` TEXT,
+  `is_read` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`alert_id`),
+  INDEX `idx_janitor_alerts_janitor_id` (`janitor_id`),
+  INDEX `idx_janitor_alerts_bin_id` (`bin_id`),
+  INDEX `idx_janitor_alerts_notification_id` (`notification_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
     session_id INT AUTO_INCREMENT PRIMARY KEY,
     user_type ENUM('admin', 'janitor') NOT NULL,
